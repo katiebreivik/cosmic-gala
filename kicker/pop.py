@@ -8,6 +8,8 @@ import astropy.units as u
 import astropy.coordinates as coords
 import h5py as h5
 import pandas as pd
+pd.options.mode.chained_assignment = None
+
 from tqdm import tqdm
 import healpy as hp
 import matplotlib.pyplot as plt
@@ -20,12 +22,14 @@ from cosmic.sample.sampler.independent import Sample
 from cosmic.evolve import Evolve
 import gala.potential as gp
 import gala.dynamics as gd
+from legwork import utils as lwutils
 
-from kicker import galaxy
+from kicker import galaxy, grid
 from kicker.kicks import integrate_orbit_with_events
 from kicker.events import identify_events
 from kicker.classify import determine_final_classes
 from kicker.observables import get_photometry
+from kicker.grid import get_cosmic_datfiles
 
 __all__ = ["Population", "load"]
 
@@ -924,10 +928,17 @@ def load(file_name):
 
 
 class EvolvedPopulation(Population):
-    def __init__(self, n_binaries, mass_singles=None, mass_binaries=None, n_singles_req=None, n_bin_req=None,
+    def __init__(self, grid_path, kstar1, kstar2,
+                 met_grid=np.logspace(-4, np.log10(0.03), 15), 
+                 galaxy_model=galaxy.Frankel2018,
+                 mass_singles=None, mass_binaries=None, n_singles_req=None, n_bin_req=None,
                  bpp=None, bcm=None, initC=None, kick_info=None, **pop_kwargs):
-        super().__init__(n_binaries=n_binaries, **pop_kwargs)
-
+        #super().__init__(grid_path=grid_path, kstar1=kstar1, kstar2=kstar2, **pop_kwargs)
+        self._grid_path = grid_path
+        self._kstar1 = kstar1
+        self._kstar2 = kstar2
+        self._met_grid = met_grid
+        self._galaxy_model = galaxy_model
         self._mass_singles = mass_singles
         self._mass_binaries = mass_binaries
         self._n_singles_req = n_singles_req
@@ -942,6 +953,139 @@ class EvolvedPopulation(Population):
 
     def perform_stellar_evolution(self):
         raise NotImplementedError("`EvolvedPopulation` cannot do stellar evolution, use `Population` instead")
+        
+    def find_metallicity_weights(self, samples = 1000000):
+        """Calculate the SFH weights for the Galactic model based on the metallicity grid of the data
+        
+        Parameters
+        ----------
+        samples : `int`
+            Size of the samples to draw to get the weights
+            
+        Returns
+        -------
+        w_Z : `array`
+            Array matching the size of the metallicity grid with SFH weights
+        """
+        inner_bins = np.array([self._met_grid[i] + (self._met_grid[i+1] - self._met_grid[i]) / 2 
+                               for i in range(len(self._met_grid) - 1)])
+        bins = np.concatenate(([self._met_grid[0]], inner_bins, [self._met_grid[-1]]))
+    
+        
+        initial_gx = self._galaxy_model(size=samples, 
+                                        components=["low_alpha_disc", "high_alpha_disc"],
+                                        component_masses=[2.585e10, 2.585e10])
+    
+        # adjust the sample so everything falls inside the compas grid
+        sampled_Z = initial_gx.Z
+        sampled_Z[sampled_Z > np.max(self._met_grid)] = np.max(self._met_grid)
+        sampled_Z[sampled_Z < np.min(self._met_grid)] = np.min(self._met_grid)
+        
+        # create a histogram on the grid and divide by the number of samples to find the weights
+        h, _ = np.histogram(sampled_Z, bins=bins)
+        w_Z = h / samples
+        return w_Z, bins
+    
+    def get_population_sample_size(self):
+        """Compute the size of the initial Galaxy sample based on the 
+        sim formation rate per unit solar mass for each kstar type
+        
+        Returns
+        -------
+        n_sample : `int`
+            size of population sample
+        """
+        # Determine how to divide up the star formation 
+        self._Z_weights, self._Z_bins = self.find_metallicity_weights()
+        
+        ## galactic disk components
+        mlow = 2.585e10
+        mhi = 2.585e10
+        m_tot_Z = (mlow + mhi) * self._Z_weights
+
+        self._paths = get_cosmic_datfiles(self._met_grid, self._kstar1, self._kstar2, self._grid_path)
+        m_sim_form = []
+        n_sim_form = []
+        for path in self._paths:
+            m_sim_form.append(pd.read_hdf(path, key='mass_stars').iloc[-1].values[0])
+            conv = pd.read_hdf(path, key='conv')
+            conv = conv.loc[conv.sep < 5000]
+            n_sim_form.append(len(conv))
+        
+        # The total size of the sample is then the size of the simulated population
+        # weighted by the ratio of the amount of mass formed in the gx model 
+        # to the simulated mass required to produce the simulations
+        n_sample = np.sum(n_sim_form * m_tot_Z / m_sim_form)
+        
+        # Determine whether to add an extra sample to pop probabilistically
+        float_prob = n_sample - int(n_sample)
+        if np.random.uniform(0,1) < float_prob:
+            n_sample = int(n_sample) + 1
+        else:
+            n_sample = int(n_sample)
+        
+        return n_sample 
+            
+    def get_grid_pop(self):
+        self._init_Gx = self._galaxy_model(size=self._n_sample, 
+                                           components=["low_alpha_disc", "high_alpha_disc"],
+                                           component_masses=[2.585e10, 2.585e10])
+        grid_met = self._init_Gx.Z
+        grid_met[grid_met < 1e-4] = 1e-4
+        grid_met[grid_met > 0.03] = 0.03
+        
+        age = self._init_Gx.tau
+
+        mergers = pd.DataFrame(columns = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", 
+                                          "sep", "bin_num", "porb_today", "sep_today", "t_evol_GW", 
+                                          "t_RLOF", "forb_today"])
+        
+        DWDs = pd.DataFrame(columns = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", 
+                                       "sep", "bin_num", "porb_today", "sep_today", "t_evol_GW", 
+                                       "t_RLOF", "forb_today"])
+        
+        for ii, (m, path) in tqdm(enumerate(zip(self._Z_bins[1:], self._paths)), total=len(self._paths)):
+            met_mask = (grid_met < m) & (grid_met >= self._Z_bins[ii])
+            met_select = grid_met[met_mask]
+            age_select = age[met_mask]
+                                         
+            DWDs = pd.read_hdf(path, key="conv")
+            DWDs = DWDs.loc[DWDs.sep < 5000]
+            DWD_sample = DWDs.sample(len(met_select), replace=True)
+            
+            # Filter out any binaries which won't make a DWD by the present day
+            # based on the age from the Galactic sample
+            n_no_DWD = len(DWD_sample.loc[DWD_sample.tphys.values * u.Myr > age_select])
+            DWD_form_mask = DWD_sample.tphys.values * u.Myr < age_select
+            DWD_sample = DWD_sample.loc[DWD_sample.tphys.values * u.Myr < age_select]
+            age_select = age_select[DWD_form_mask]
+            met_select = met_select[DWD_form_mask]
+            
+            t_evol = age_select - DWD_sample.tphys.values * u.Myr 
+            
+            # Calculate the final separations and RLOF times for each binary
+            sep_f, forb_f, t_RLOF = grid.WD_GW_evol(t_evol=t_evol, 
+                                                    m1=DWD_sample.mass_1.values * u.Msun, 
+                                                    m2=DWD_sample.mass_2.values * u.Msun, 
+                                                    sep_i=DWD_sample.sep.values * u.Rsun)
+            
+            porb_f = 0.5 / forb_f
+            
+            pop_cols_keep = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", "sep", "bin_num"]
+            
+            DWD_today = DWD_sample[pop_cols_keep]
+            DWD_today["porb_today"] = porb_f.to(u.day).value
+            DWD_today["sep_today"] = sep_f.to(u.Rsun).value
+            DWD_today["t_evol_GW"] = t_evol.to(u.Myr).value
+            DWD_today["t_RLOF"] = t_RLOF.to(u.Myr).value
+            DWD_today["forb_today"] = forb_f.to(u.Hz).value
+            
+            DWD_pop = DWD_today.loc[(DWD_today.t_evol_GW < DWD_today.t_RLOF) & 
+                                     (DWD_today.porb_today < 50)]
+            mergers = pd.concat([mergers, DWD_today.loc[DWD_today.t_evol_GW > DWD_today.t_RLOF]])
+            DWDs = pd.concat([DWDs, DWD_pop])
+        self._mergers = mergers
+        self._DWDs = DWDs
 
     def create_population(self, with_timing=True):
         """Create an entirely evolved population of binaries with sampling or stellar evolution
@@ -955,22 +1099,29 @@ class EvolvedPopulation(Population):
         """
         if with_timing:
             start = time.time()
-            print(f"Run for {self.n_binaries} binaries")
-
-        self.sample_initial_galaxy()
+            print(f"Run for {self._kstar1} and {self._kstar2} binaries")
+        
+        self._n_sample = self.get_population_sample_size()
+        
         if with_timing:
-            print(f"[{time.time() - start:1.0e}s] Sample initial galaxy")
+            print(f"[{time.time() - start:1.1f}s] We'll sample {self._n_sample} binaries")
             lap = time.time()
-
-        self.pool = Pool(self.processes) if self.processes > 1 else None
-        self.perform_galactic_evolution(progress_bar=with_timing)
+            
+        self.get_grid_pop()
+#
         if with_timing:
-            print(f"[{time.time() - lap:1.1f}s] Get orbits (run gala)")
-
-        if self.pool is not None:
-            self.pool.close()
-            self.pool.join()
-            self.pool = None
-
-        if with_timing:
-            print(f"Overall: {time.time() - start:1.1f}s")
+            print(f"[{time.time() - lap:1.1f}s] pop matched!")
+            print(f"the number of mergers is {len(self._mergers)}")
+            print(f"the number of DWDs with P < 50 days is {len(self._DWDs)}")
+#
+        #self.pool = Pool(self.processes) if self.processes > 1 else None
+        #self.perform_galactic_evolution(progress_bar=with_timing)
+        
+        #if self.pool is not None:
+        #    self.pool.close()
+        #    self.pool.join()
+        #    self.pool = None
+#
+        #if with_timing:
+        #    print(f"Overall: {time.time() - start:1.1f}s")
+#

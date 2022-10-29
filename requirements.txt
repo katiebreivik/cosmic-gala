@@ -17,3 +17,4 @@ isochrones
 dustmaps
 healpy
 gaiaunlimited
+legwork
