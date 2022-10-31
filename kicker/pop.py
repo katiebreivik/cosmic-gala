@@ -8,7 +8,6 @@ import astropy.units as u
 import astropy.coordinates as coords
 import h5py as h5
 import pandas as pd
-pd.options.mode.chained_assignment = None
 
 from tqdm import tqdm
 import healpy as hp
@@ -1049,9 +1048,9 @@ class EvolvedPopulation(Population):
             met_select = grid_met[met_mask]
             age_select = age[met_mask]
                                          
-            DWDs = pd.read_hdf(path, key="conv")
-            DWDs = DWDs.loc[DWDs.sep < 5000]
-            DWD_sample = DWDs.sample(len(met_select), replace=True)
+            DWDs_in = pd.read_hdf(path, key="conv")
+            DWDs_in = DWDs_in.loc[DWDs_in.sep < 5000]
+            DWD_sample = DWDs_in.sample(len(met_select), replace=True)
             
             # Filter out any binaries which won't make a DWD by the present day
             # based on the age from the Galactic sample
