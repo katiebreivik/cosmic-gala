@@ -3,6 +3,7 @@ import pandas as pd
 import astropy.units as u
 import astropy.constants as const
 from dustmaps.bayestar import BayestarQuery
+from scipy.interpolate import interp1d
 
 # HACK around the isochrone import to ignore warnings about Holoview and Multinest
 import logging
@@ -11,7 +12,7 @@ from isochrones.mist.bc import MISTBolometricCorrectionGrid
 logging.getLogger("isochrones").setLevel("WARNING")
 
 __all__ = ["get_log_g", "get_absolute_bol_mag", "get_apparent_mag", "get_absolute_mag", "add_mags",
-           "get_extinction", "get_photometry"]
+           "get_extinction", "get_photometry", "get_WD_photometry""get_single_WD_photometry"]
 
 
 def get_log_g(mass, radius):
@@ -329,3 +330,125 @@ def get_photometry(final_bpp, final_coords, filters, ignore_extinction=False):
                 photometry.loc[two_is_brighter, "log_g_obs"] = final_bpp["log_g_2"].values[two_is_brighter]
 
     return photometry
+
+
+def WD_photometry(age_dat, mass_dat, color_select):
+    """Computes the photometry of a single white dwarf
+    population based on age and mass for colors provided
+    
+    Uses the WD cooling models of Pierre Bergeron et al. 
+    https://www.astro.umontreal.ca/~bergeron/CoolingModels/
+    
+    Parameters
+    ----------
+    age : `numpy.array`
+        White dwarf ages with astropy time unit
+    mass : `numpy.array`
+        White dwarf masses with astropy mass unit
+    color_select : `str`
+        Specifies the colors to compute absolute brightnesses for
+        choose from:
+        ["Mbol", "UU", "BB", "VV", "RR", "II", 
+         "JJ", "HH", "Ks", "Y", "J", "H", "K", "W1",
+         "W2", "W3", "W4", "S3.6", "S4.5", "S5.8", "S8.0", 
+         "u", "g", "r", "i", "z", "gg", "rr", "ii", "zz", "yy",
+         "G2", "G2_BP", "G2_RP", "G3", "G3_BP", "G3_RP", 
+         "FUV", "NUV"]
+         
+    Returns
+    -------
+    photometry : `list` of `numpy.array`s 
+        Absolute magnitudes for each WD in color_select color
+    """
+    # age is in yrs
+    WD_models = pd.read_hdf("../data/Bergeron_WD_photometry.h5", key="dat")
+    masses = np.round(np.arange(0.2, 1.4, 0.1), 1)
+    mag = np.zeros(len(age_dat))
+    for m in masses:
+        ind, = np.where( (mass_dat < m + 0.05) & (mass_dat> m - 0.05) )
+        WD_model = WD_models.loc[(WD_models.mass == m)]
+        mag_interp = interp1d(WD_model.Age.values/1e6, WD_model[color_select].values, fill_value="extrapolate)
+    
+        mag[ind] = mag_interp(age_dat[ind])
+    
+                              
+    return mag
+
+
+def get_single_WD_photometry(age, mass, color_select):
+    """Computes the photometry of a single white dwarf
+    population based on age and mass for colors provided
+    
+    Uses the WD cooling models of Pierre Bergeron et al. 
+    https://www.astro.umontreal.ca/~bergeron/CoolingModels/
+    
+    Parameters
+    ----------
+    age : `numpy.array`
+        White dwarf ages with astropy time unit
+    mass : `numpy.array`
+        White dwarf masses with astropy mass unit
+    color_select : `list` of `str`
+        Specifies the colors to compute absolute brightnesses for
+        choose from:
+        ["Mbol", "UU", "BB", "VV", "RR", "II", 
+         "JJ", "HH", "Ks", "Y", "J", "H", "K", "W1",
+         "W2", "W3", "W4", "S3.6", "S4.5", "S5.8", "S8.0", 
+         "u", "g", "r", "i", "z", "gg", "rr", "ii", "zz", "yy",
+         "G2", "G2_BP", "G2_RP", "G3", "G3_BP", "G3_RP", 
+         "FUV", "NUV"]
+         
+    Returns
+    -------
+    photometry_abs : `list` of `numpy.array`s 
+        Absolute magnitudes for each WD and color
+    """
+    photometry_abs =  WD_photometry(age.to(u.Myr).value, mass.to(u.Msun).value, color_select))
+    
+    return photometry_abs
+    
+
+def get_binary_WD_photometry(age_1, age_2, mass_1, mass_2, color_select):
+    """Computes the photometry of a single white dwarf
+    population based on age and mass for colors provided
+    
+    Uses the WD cooling models of Pierre Bergeron et al. 
+    https://www.astro.umontreal.ca/~bergeron/CoolingModels/
+    
+    Parameters
+    ----------
+    age_1 : `numpy.array`
+        White dwarf ages for component 1 with astropy time unit
+    age_2 : `numpy.array`
+        White dwarf ages for component 2 with astropy time unit
+    mass_1 : `numpy.array`
+        White dwarf masses for component 1 with astropy mass unit
+    mass_2 : `numpy.array`
+        White dwarf masses for component 2 with astropy mass unit
+    color_select : `list` of `str`
+        Specifies the colors to compute absolute brightnesses for
+        choose from:
+        ["Mbol", "UU", "BB", "VV", "RR", "II", 
+         "JJ", "HH", "Ks", "Y", "J", "H", "K", "W1",
+         "W2", "W3", "W4", "S3.6", "S4.5", "S5.8", "S8.0", 
+         "u", "g", "r", "i", "z", "gg", "rr", "ii", "zz", "yy",
+         "G2", "G2_BP", "G2_RP", "G3", "G3_BP", "G3_RP", 
+         "FUV", "NUV"]
+         
+    Returns
+    -------
+    photometry_1 : `list` of `numpy.array`s 
+        Absolute magnitudes for each WD and color for component 1
+    photometry_2 : `list` of `numpy.array`s 
+        Absolute magnitudes for each WD and color for component 2
+    photometry_tot : `list` of `numpy.array`s 
+        Absolute magnitudes for each WD and color for binary brightness
+    """
+    
+    
+    photometry_1_abs =  WD_photometry(age_1.to(u.Myr).value, mass_1.to(u.Msun).value, color_select)
+    photometry_2_abs =  WD_photometry(age_2.to(u.Myr).value, mass_2.to(u.Msun).value, color_select)
+    filter_mags = [phot1, phot2 for zip(photometry_1, photometry_2)]
+    photometry_tot_abs = add_mags(*filter_mags)
+    
+    return photometry_1, photometry_2, photometry_tot

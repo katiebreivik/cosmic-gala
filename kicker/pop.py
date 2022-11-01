@@ -547,7 +547,7 @@ class Population():
             print(f"WARNING: {n_nan} bad binaries removed from tables - but normalisation may be off")
             print("I've added the offending binaries to the `nan.h5` file, do with them what you will")
 
-    def perform_galactic_evolution(self, quiet=False, progress_bar=True):
+    def perform_galactic_evolution(self, quiet=False, progress_bar=True, ignore_events=False):
         """Use :py:mod:`gala` to perform the orbital integration for each evolved binary
 
         Parameters
@@ -573,7 +573,10 @@ class Population():
         w0s = gd.PhaseSpacePosition(rep.with_differentials(dif))
 
         # identify the pertinent events in the evolution
-        events = identify_events(full_bpp=self.bpp, full_kick_info=self.kick_info)
+        if ignore_events:
+            events = np.repeat(None, self.n_binaries_match)
+        else:
+            events = identify_events(full_bpp=self.bpp, full_kick_info=self.kick_info)
 
         # if we want to use multiprocessing
         if self.pool is not None or self.processes > 1:
@@ -929,7 +932,9 @@ def load(file_name):
 class EvolvedPopulation(Population):
     def __init__(self, grid_path, kstar1, kstar2,
                  met_grid=np.logspace(-4, np.log10(0.03), 15), 
-                 galaxy_model=galaxy.Frankel2018,
+                 galaxy_model=galaxy.Frankel2018, v_dispersion=5 * u.km / u.s,
+                 galactic_potential=gp.MilkyWayPotential(), processes=1, 
+                 timestep_size=1 * u.Myr, store_entire_orbits=True, max_ev_time = 12 * u.Gyr,
                  mass_singles=None, mass_binaries=None, n_singles_req=None, n_bin_req=None,
                  bpp=None, bcm=None, initC=None, kick_info=None, **pop_kwargs):
         #super().__init__(grid_path=grid_path, kstar1=kstar1, kstar2=kstar2, **pop_kwargs)
@@ -938,6 +943,12 @@ class EvolvedPopulation(Population):
         self._kstar2 = kstar2
         self._met_grid = met_grid
         self._galaxy_model = galaxy_model
+        self.max_ev_time = max_ev_time
+        self.timestep_size = timestep_size
+        self.store_entire_orbits = store_entire_orbits
+        self.galactic_potential = galactic_potential
+        self.v_dispersion = v_dispersion
+        self.processes = processes
         self._mass_singles = mass_singles
         self._mass_binaries = mass_binaries
         self._n_singles_req = n_singles_req
@@ -946,6 +957,7 @@ class EvolvedPopulation(Population):
         self._bcm = bcm
         self._initC = initC
         self._kick_info = kick_info
+        
 
     def sample_initial_binaries(self):
         raise NotImplementedError("`EvolvedPopulation` cannot sample new binaries, use `Population` instead")
@@ -1025,15 +1037,17 @@ class EvolvedPopulation(Population):
         
         return n_sample 
             
-    def get_grid_pop(self):
-        self._init_Gx = self._galaxy_model(size=self._n_sample, 
+    def get_grid_pop(self, with_timing, orbital_period_cut=50*u.day):
+        # sample the initial ages, metallicities, positions for the disc
+        # we don't worry about the bulge since no WDs are observed from this far away
+        _init_Gx = self._galaxy_model(size=self._n_sample, 
                                            components=["low_alpha_disc", "high_alpha_disc"],
                                            component_masses=[2.585e10, 2.585e10])
-        grid_met = self._init_Gx.Z
+        grid_met = _init_Gx.Z
         grid_met[grid_met < 1e-4] = 1e-4
         grid_met[grid_met > 0.03] = 0.03
         
-        age = self._init_Gx.tau
+        age = _init_Gx.tau
 
         mergers = pd.DataFrame(columns = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", 
                                           "sep", "bin_num", "porb_today", "sep_today", "t_evol_GW", 
@@ -1042,11 +1056,12 @@ class EvolvedPopulation(Population):
         DWDs = pd.DataFrame(columns = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", 
                                        "sep", "bin_num", "porb_today", "sep_today", "t_evol_GW", 
                                        "t_RLOF", "forb_today"])
-        
-        for ii, (m, path) in tqdm(enumerate(zip(self._Z_bins[1:], self._paths)), total=len(self._paths)):
+        final_orbits = []
+                
+        for ii, (m, path) in enumerate(zip(self._Z_bins[1:], self._paths)):
             met_mask = (grid_met < m) & (grid_met >= self._Z_bins[ii])
+            self._initial_galaxy = _init_Gx[met_mask]
             met_select = grid_met[met_mask]
-            age_select = age[met_mask]
                                          
             DWDs_in = pd.read_hdf(path, key="conv")
             DWDs_in = DWDs_in.loc[DWDs_in.sep < 5000]
@@ -1054,15 +1069,16 @@ class EvolvedPopulation(Population):
             
             # Filter out any binaries which won't make a DWD by the present day
             # based on the age from the Galactic sample
-            n_no_DWD = len(DWD_sample.loc[DWD_sample.tphys.values * u.Myr > age_select])
-            DWD_form_mask = DWD_sample.tphys.values * u.Myr < age_select
-            DWD_sample = DWD_sample.loc[DWD_sample.tphys.values * u.Myr < age_select]
-            age_select = age_select[DWD_form_mask]
+            n_no_DWD = len(DWD_sample.loc[self.max_ev_time - (DWD_sample.tphys.values * u.Myr + self._initial_galaxy.tau) < 0])
+            DWD_form_mask = self.max_ev_time - (DWD_sample.tphys.values * u.Myr + self._initial_galaxy.tau) > 0
+            DWD_sample = DWD_sample.loc[self.max_ev_time - (DWD_sample.tphys.values * u.Myr + self._initial_galaxy.tau) > 0]
+            self._initial_galaxy = self._initial_galaxy[DWD_form_mask]
             met_select = met_select[DWD_form_mask]
             
-            t_evol = age_select - DWD_sample.tphys.values * u.Myr 
+            t_evol = self.max_ev_time - (self._initial_galaxy.tau + DWD_sample.tphys.values * u.Myr)
             
             # Calculate the final separations and RLOF times for each binary
+            # to gather DWD merger candidates
             sep_f, forb_f, t_RLOF = grid.WD_GW_evol(t_evol=t_evol, 
                                                     m1=DWD_sample.mass_1.values * u.Msun, 
                                                     m2=DWD_sample.mass_2.values * u.Msun, 
@@ -1072,21 +1088,62 @@ class EvolvedPopulation(Population):
             
             pop_cols_keep = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", "sep", "bin_num"]
             
-            DWD_today = DWD_sample[pop_cols_keep]
+            DWD_today = DWD_sample[pop_cols_keep].copy()
             DWD_today["porb_today"] = porb_f.to(u.day).value
             DWD_today["sep_today"] = sep_f.to(u.Rsun).value
             DWD_today["t_evol_GW"] = t_evol.to(u.Myr).value
             DWD_today["t_RLOF"] = t_RLOF.to(u.Myr).value
             DWD_today["forb_today"] = forb_f.to(u.Hz).value
+            DWD_today["met_grid"] = met_select
             
             DWD_pop = DWD_today.loc[(DWD_today.t_evol_GW < DWD_today.t_RLOF) & 
-                                     (DWD_today.porb_today < 50)]
+                                     (DWD_today.porb_today < orbital_period_cut.to(u.day).value)]
             mergers = pd.concat([mergers, DWD_today.loc[DWD_today.t_evol_GW > DWD_today.t_RLOF]])
             DWDs = pd.concat([DWDs, DWD_pop])
+            self.n_binaries_match = len(DWD_today)
+            
+            # perform the Galactic orbit evolution
+            # work out the initial velocities of each binary
+            vel_units = u.km / u.s
+    
+            # calculate the Galactic circular velocity at the initial positions
+            v_circ = self.galactic_potential.circular_velocity(q=[self._initial_galaxy.positions.x,
+                                                                  self._initial_galaxy.positions.y,
+                                                                  self._initial_galaxy.positions.z]).to(vel_units)
+    
+            # add some velocity dispersion
+            v_R, v_T, v_z = np.random.normal([np.zeros_like(v_circ), v_circ, np.zeros_like(v_circ)],
+                                             self.v_dispersion.to(vel_units) / np.sqrt(3),
+                                             size=(3, self.n_binaries_match))
+            v_R, v_T, v_z = v_R * vel_units, v_T * vel_units, v_z * vel_units
+            self._initial_galaxy._v_R = v_R
+            self._initial_galaxy._v_T = v_T
+            self._initial_galaxy._v_z = v_z
+                
+            
+            self.pool = Pool(self.processes) if self.processes > 1 else None
+            self.perform_galactic_evolution(progress_bar=with_timing, ignore_events=True)
+                        
+            if self.pool is not None:
+                self.pool.close()
+                self.pool.join()
+                self.pool = None
+                
+            binary_coords, _ = self.get_final_coords()
+            
+            import pdb
+            pdb.set_trace()
+
+                
+            
+                
+            final_orbits.append(self._orbits)
+            
         self._mergers = mergers
         self._DWDs = DWDs
+        self._final_orbits = final_orbits
 
-    def create_population(self, with_timing=True):
+    def create_population(self, orbital_period_cut=50*u.day, with_timing=True):
         """Create an entirely evolved population of binaries with sampling or stellar evolution
 
         This will sample the initial galaxy and then perform the :py:mod:`gala` evolution.
@@ -1105,16 +1162,15 @@ class EvolvedPopulation(Population):
         if with_timing:
             print(f"[{time.time() - start:1.1f}s] We'll sample {self._n_sample} binaries")
             lap = time.time()
-            
-        self.get_grid_pop()
+        self.get_grid_pop(with_timing=with_timing, orbital_period_cut=orbital_period_cut)
 #
         if with_timing:
             print(f"[{time.time() - lap:1.1f}s] pop matched!")
             print(f"the number of mergers is {len(self._mergers)}")
-            print(f"the number of DWDs with P < 50 days is {len(self._DWDs)}")
+            print(f"the number of DWDs with P < {orbital_period_cut} is {len(self._DWDs)}")
 #
-        #self.pool = Pool(self.processes) if self.processes > 1 else None
-        #self.perform_galactic_evolution(progress_bar=with_timing)
+#        self.pool = Pool(self.processes) if self.processes > 1 else None
+#        self.perform_galactic_evolution(progress_bar=with_timing)
         
         #if self.pool is not None:
         #    self.pool.close()
