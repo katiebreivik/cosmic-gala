@@ -341,9 +341,9 @@ def WD_photometry(age_dat, mass_dat, color_select):
     
     Parameters
     ----------
-    age : `numpy.array`
+    age : :class:`~numpy.ndarray`
         White dwarf ages with astropy time unit
-    mass : `numpy.array`
+    mass : :class:`~numpy.ndarray`
         White dwarf masses with astropy mass unit
     color_select : `str`
         Specifies the colors to compute absolute brightnesses for
@@ -357,7 +357,7 @@ def WD_photometry(age_dat, mass_dat, color_select):
          
     Returns
     -------
-    photometry : `list` of `numpy.array`s 
+    photometry : `list` of :class:`~numpy.ndarray`s 
         Absolute magnitudes for each WD in color_select color
     """
     # age is in yrs
@@ -384,9 +384,9 @@ def get_single_WD_photometry(age, mass, color_select):
     
     Parameters
     ----------
-    age : `numpy.array`
+    age : :class:`~numpy.ndarray`
         White dwarf ages with astropy time unit
-    mass : `numpy.array`
+    mass : :class:`~numpy.ndarray`
         White dwarf masses with astropy mass unit
     color_select : `list` of `str`
         Specifies the colors to compute absolute brightnesses for
@@ -400,7 +400,7 @@ def get_single_WD_photometry(age, mass, color_select):
          
     Returns
     -------
-    photometry_abs : `list` of `numpy.array`s 
+    photometry_abs : `list` of :class:`~numpy.ndarray`s 
         Absolute magnitudes for each WD and color
     """
     photometry_abs =  WD_photometry(age.to(u.Myr).value, mass.to(u.Msun).value, color_select))
@@ -417,13 +417,13 @@ def get_binary_WD_photometry(age_1, age_2, mass_1, mass_2, color_select):
     
     Parameters
     ----------
-    age_1 : `numpy.array`
+    age_1 : :class:`~numpy.ndarray`
         White dwarf ages for component 1 with astropy time unit
-    age_2 : `numpy.array`
+    age_2 : :class:`~numpy.ndarray`
         White dwarf ages for component 2 with astropy time unit
-    mass_1 : `numpy.array`
+    mass_1 : :class:`~numpy.ndarray`
         White dwarf masses for component 1 with astropy mass unit
-    mass_2 : `numpy.array`
+    mass_2 : :class:`~numpy.ndarray`
         White dwarf masses for component 2 with astropy mass unit
     color_select : `list` of `str`
         Specifies the colors to compute absolute brightnesses for
@@ -437,11 +437,11 @@ def get_binary_WD_photometry(age_1, age_2, mass_1, mass_2, color_select):
          
     Returns
     -------
-    photometry_1 : `list` of `numpy.array`s 
+    photometry_1 : `list` of :class:`~numpy.ndarray`s 
         Absolute magnitudes for each WD and color for component 1
-    photometry_2 : `list` of `numpy.array`s 
+    photometry_2 : `list` of :class:`~numpy.ndarray`s 
         Absolute magnitudes for each WD and color for component 2
-    photometry_tot : `list` of `numpy.array`s 
+    photometry_tot : `list` of :class:`~numpy.ndarray`s 
         Absolute magnitudes for each WD and color for binary brightness
     """
     
