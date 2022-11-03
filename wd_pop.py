@@ -17,11 +17,13 @@ kstar2s = ['10', '10' ,'11' ,'10_12']
 #
 
 for kstar1, kstar2 in zip(kstar1s[:1], kstar2s[:1]):
-    p = kicker.pop.EvolvedPopulation(grid_path=grid_path, kstar1=kstar1, kstar2=kstar2, met_grid=met_grid, galaxy_model=galaxy.Frankel2018, processes=10, galactic_potential=gp.MilkyWayPotential())
+    p = kicker.pop.EvolvedPopulation(grid_path=grid_path, kstar1=kstar1, kstar2=kstar2, met_grid=met_grid, galaxy_model=galaxy.Frankel2018, processes=1, galactic_potential=gp.MilkyWayPotential())
 
     p.create_population(orbital_period_cut=5*u.day)
     
-    plt.hist(p._mergers.porb_today)
+    import pdb
+    pdb.set_trace()
+    plt.hist(p._mergers_coords.v_)
     plt.show()
     #p.get_grid_pop()
 

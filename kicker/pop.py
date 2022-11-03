@@ -27,7 +27,7 @@ from kicker import galaxy, grid
 from kicker.kicks import integrate_orbit_with_events
 from kicker.events import identify_events
 from kicker.classify import determine_final_classes
-from kicker.observables import get_photometry
+from kicker.observables import get_photometry, get_WD_photometry
 from kicker.grid import get_cosmic_datfiles
 
 __all__ = ["Population", "load"]
@@ -1037,7 +1037,7 @@ class EvolvedPopulation(Population):
         
         return n_sample 
             
-    def get_grid_pop(self, with_timing, orbital_period_cut=50*u.day):
+    def get_grid_pop(self, with_timing, orbital_period_cut=50*u.day, GaiaG_cut=20):
         # sample the initial ages, metallicities, positions for the disc
         # we don't worry about the bulge since no WDs are observed from this far away
         _init_Gx = self._galaxy_model(size=self._n_sample, 
@@ -1048,23 +1048,28 @@ class EvolvedPopulation(Population):
         grid_met[grid_met > 0.03] = 0.03
         
         age = _init_Gx.tau
-
-        mergers = pd.DataFrame(columns = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", 
-                                          "sep", "bin_num", "porb_today", "sep_today", "t_evol_GW", 
-                                          "t_RLOF", "forb_today"])
         
-        DWDs = pd.DataFrame(columns = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", 
-                                       "sep", "bin_num", "porb_today", "sep_today", "t_evol_GW", 
-                                       "t_RLOF", "forb_today"])
-        final_orbits = []
-                
+        self._mergers = pd.DataFrame()
+        self._merger_bpps = pd.DataFrame()
+        self._merger_coords = []
+        self._DWDs = pd.DataFrame()
+        self._DWD_bpps = pd.DataFrame()
+        self._DWD_coords = []
         for ii, (m, path) in enumerate(zip(self._Z_bins[1:], self._paths)):
+            # first select the metallicities in the bin
             met_mask = (grid_met < m) & (grid_met >= self._Z_bins[ii])
             self._initial_galaxy = _init_Gx[met_mask]
             met_select = grid_met[met_mask]
-                                         
+            
+            # read in the data
             DWDs_in = pd.read_hdf(path, key="conv")
             DWDs_in = DWDs_in.loc[DWDs_in.sep < 5000]
+
+            bpp_in = pd.read_hdf(path, key="bpp")
+            bpp_in = bpp_in.loc[bpp_in.bin_num.isin(DWDs_in.bin_num)]
+            
+            DWDs_in["t_WD_1"] = bpp_in.loc[bpp_in.kstar_1.isin([10,11,12])].groupby('bin_num').first().tphys.values
+            DWDs_in["t_WD_2"] = bpp_in.loc[bpp_in.kstar_2.isin([10,11,12])].groupby('bin_num').first().tphys.values
             DWD_sample = DWDs_in.sample(len(met_select), replace=True)
             
             # Filter out any binaries which won't make a DWD by the present day
@@ -1086,9 +1091,10 @@ class EvolvedPopulation(Population):
             
             porb_f = 0.5 / forb_f
             
-            pop_cols_keep = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", "sep", "bin_num"]
+            pop_cols_keep = ["tphys", "mass_1", "mass_2", "kstar_1", "kstar_2", "porb", 
+                             "sep", "bin_num", "t_WD_1", "t_WD_2"]
             
-            DWD_today = DWD_sample[pop_cols_keep].copy()
+            DWD_today = DWD_sample[pop_cols_keep].copy().reset_index()
             DWD_today["porb_today"] = porb_f.to(u.day).value
             DWD_today["sep_today"] = sep_f.to(u.Rsun).value
             DWD_today["t_evol_GW"] = t_evol.to(u.Myr).value
@@ -1096,12 +1102,10 @@ class EvolvedPopulation(Population):
             DWD_today["forb_today"] = forb_f.to(u.Hz).value
             DWD_today["met_grid"] = met_select
             
-            DWD_pop = DWD_today.loc[(DWD_today.t_evol_GW < DWD_today.t_RLOF) & 
-                                     (DWD_today.porb_today < orbital_period_cut.to(u.day).value)]
-            mergers = pd.concat([mergers, DWD_today.loc[DWD_today.t_evol_GW > DWD_today.t_RLOF]])
-            DWDs = pd.concat([DWDs, DWD_pop])
+            DWD_today["WD_age_1"] = (self.max_ev_time - (self._initial_galaxy.tau + DWD_today["t_WD_1"].values * u.Myr)).to(u.Myr).value
+            DWD_today["WD_age_2"] = (self.max_ev_time - (self._initial_galaxy.tau + DWD_today["t_WD_2"].values * u.Myr)).to(u.Myr).value
             self.n_binaries_match = len(DWD_today)
-            
+
             # perform the Galactic orbit evolution
             # work out the initial velocities of each binary
             vel_units = u.km / u.s
@@ -1129,21 +1133,57 @@ class EvolvedPopulation(Population):
                 self.pool.join()
                 self.pool = None
                 
-            binary_coords, _ = self.get_final_coords()
+            final_coords = self.get_final_coords()
             
-            import pdb
-            pdb.set_trace()
+            DWD_pop_mask = ((DWD_today.t_evol_GW < DWD_today.t_RLOF) & 
+                           (DWD_today.porb_today < orbital_period_cut.to(u.day).value))
+            DWD_today["DWD_binary"] = 0
+            DWD_today.loc[DWD_pop_mask, "DWD_binary"] = 1
+            
+            merger_mask = DWD_today.t_evol_GW.values > DWD_today.t_RLOF.values
+            DWD_today["DWD_merger"] = 0
+            DWD_today.loc[merger_mask, "DWD_merger"] = 1
+            DWD_today["WD_merger_age"] = 0
+            DWD_today.loc[merger_mask, "WD_merger_age"] = (self.max_ev_time - (self._initial_galaxy[merger_mask].tau + DWD_today.loc[merger_mask].t_RLOF.values * u.Myr)).to(u.Myr).value
+            DWD_today.loc[merger_mask, "WD_merger_mass"] = DWD_today.loc[merger_mask].mass_1.values + DWD_today.loc[merger_mask].mass_2.values
+            
+            photometry = get_WD_photometry(WD_pop=DWD_today, final_coords=final_coords, 
+                                           filters=["Mbol", "G3", "G3_BP", "G3_RP"])
+            
+            mergers = pd.concat([DWD_today[merger_mask].copy(), photometry[merger_mask]].copy(), axis=1)
+            merger_phot_mask = mergers.G3_app_merger < GaiaG_cut
+            mergers = mergers[merger_phot_mask]
+            merger_coords = final_coords[merger_mask]
+            merger_coords = merger_coords[merger_phot_mask]
+            
+            DWDs = pd.concat([DWD_today[DWD_pop_mask].copy(), photometry[DWD_pop_mask]].copy(), axis=1)
+            DWD_phot_mask = DWDs.G3_app_tot < GaiaG_cut
+            DWDs = DWDs[DWD_phot_mask]
+            DWD_coords = final_coords[DWD_pop_mask]
+            DWD_coords = DWD_coords[DWD_phot_mask]
+           
+            if len(mergers) > 0:
+                self._mergers = pd.concat([self._mergers, mergers])
+                bpps = pd.DataFrame()
+                for bin_num in mergers.bin_num:
+                    bpps = pd.concat([bpps, bpp_in.loc[bpp_in.bin_num == bin_num]])
+                self._merger_bpps = pd.concat([self._merger_bpps, bpps])
+                if len(self._merger_coords) == 0:
+                    self._merger_coords = merger_coords
+                else:
+                    self._merger_coords = coords.concatenate([self._merger_coords, merger_coords])
+            if len(DWDs) > 0:
+                self._DWDs = pd.concat([self._DWDs, DWDs])
+                bpps = pd.DataFrame()
+                for bin_num in DWDs.bin_num:
+                    bpps = pd.concat([bpps, bpp_in.loc[bpp_in.bin_num == bin_num]])
+                self._DWD_bpps = pd.concat([self._DWD_bpps, bpps])
+                if len(self._DWD_coords) == 0:
+                    self._DWD_coords = merger_coords
+                else:
+                    self._DWD_coords = coords.concatenate([self._DWD_coords, DWD_coords])
 
-                
-            
-                
-            final_orbits.append(self._orbits)
-            
-        self._mergers = mergers
-        self._DWDs = DWDs
-        self._final_orbits = final_orbits
-
-    def create_population(self, orbital_period_cut=50*u.day, with_timing=True):
+    def create_population(self, orbital_period_cut=50*u.day, GaiaG_cut = 20, with_timing=True):
         """Create an entirely evolved population of binaries with sampling or stellar evolution
 
         This will sample the initial galaxy and then perform the :py:mod:`gala` evolution.
@@ -1158,25 +1198,18 @@ class EvolvedPopulation(Population):
             print(f"Run for {self._kstar1} and {self._kstar2} binaries")
         
         self._n_sample = self.get_population_sample_size()
+        self._n_sample = int(self._n_sample / 20)
         
         if with_timing:
             print(f"[{time.time() - start:1.1f}s] We'll sample {self._n_sample} binaries")
             lap = time.time()
-        self.get_grid_pop(with_timing=with_timing, orbital_period_cut=orbital_period_cut)
-#
+        self.get_grid_pop(with_timing=with_timing, orbital_period_cut=orbital_period_cut, GaiaG_cut=GaiaG_cut)
+
         if with_timing:
             print(f"[{time.time() - lap:1.1f}s] pop matched!")
             print(f"the number of mergers is {len(self._mergers)}")
-            print(f"the number of DWDs with P < {orbital_period_cut} is {len(self._DWDs)}")
-#
-#        self.pool = Pool(self.processes) if self.processes > 1 else None
-#        self.perform_galactic_evolution(progress_bar=with_timing)
-        
-        #if self.pool is not None:
-        #    self.pool.close()
-        #    self.pool.join()
-        #    self.pool = None
-#
+            print(f"the number of DWDs with P < {orbital_period_cut} and G < 20 is {len(self._DWDs)}")
+
         #if with_timing:
         #    print(f"Overall: {time.time() - start:1.1f}s")
 #
